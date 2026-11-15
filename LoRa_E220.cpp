@@ -621,27 +621,38 @@ ResponseStatus LoRa_E220::setConfiguration(Configuration configuration, PROGRAM_
 	configuration.STARTING_ADDRESS = REG_ADDRESS_CFG;
 	configuration.LENGHT = PL_CONFIGURATION;
 
-	rc.code = this->sendStruct((uint8_t *)&configuration, sizeof(Configuration));
+	// Do not use sendStruct() here: after waiting for AUX it calls cleanUARTBuffer(),
+	// which would discard the start of the module's reply (C1 00 08 ...) and
+	// leave receiveStruct() with an incomplete response. Write directly instead.
+	size_t len = this->serialDef.stream->write((uint8_t *)&configuration, sizeof(Configuration));
+	if (len != sizeof(Configuration)) {
+		this->setMode(prevMode);
+		rc.code = (len == 0) ? ERR_E220_NO_RESPONSE_FROM_DEVICE : ERR_E220_DATA_SIZE_NOT_MATCH;
+		return rc;
+	}
+
+	Configuration response;
+	rc.code = this->receiveStruct((uint8_t *)&response, sizeof(Configuration));
+
+	#ifdef LoRa_E220_DEBUG
+		 this->printParameters((Configuration *)&response);
+	#endif
+
 	if (rc.code!=E220_SUCCESS) {
 		this->setMode(prevMode);
 		return rc;
 	}
 
-	rc.code = this->receiveStruct((uint8_t *)&configuration, sizeof(Configuration));
-
-	#ifdef LoRa_E220_DEBUG
-		 this->printParameters((Configuration *)&configuration);
-	#endif
-
-
 	rc.code = this->setMode(prevMode);
 	if (rc.code!=E220_SUCCESS) return rc;
 
-	if (WRONG_FORMAT == ((Configuration *)&configuration)->COMMAND){
+	if (WRONG_FORMAT == response.COMMAND){
 		rc.code = ERR_E220_WRONG_FORMAT;
-	}
-	if (RETURNED_COMMAND != ((Configuration *)&configuration)->COMMAND || REG_ADDRESS_CFG!= ((Configuration *)&configuration)->STARTING_ADDRESS || PL_CONFIGURATION!= ((Configuration *)&configuration)->LENGHT){
+	} else if (RETURNED_COMMAND != response.COMMAND || REG_ADDRESS_CFG != response.STARTING_ADDRESS || PL_CONFIGURATION != response.LENGHT){
 		rc.code = ERR_E220_HEAD_NOT_RECOGNIZED;
+	} else if (memcmp(&response.ADDH, &configuration.ADDH, offsetof(Configuration, CRYPT) - offsetof(Configuration, ADDH)) != 0) {
+		// The module echoes ADDH..TRANSMISSION_MODE; CRYPT is not returned.
+		rc.code = ERR_E220_INVALID_PARAM;
 	}
 
 	return rc;
